@@ -13,6 +13,10 @@ import { getCache, removeCache, PASSWORDLESS_LOCALE_KEY } from "@site/src/utils/
 /** 三种状态都要给用户看得懂的画面（原来一律 return null，白屏） */
 type CallbackState = "working" | "idle" | "failed";
 
+// 语言包等异步 Provider 更新可能重挂载回调页。同一链接在本次页面加载中只验证一次，
+// 重挂载复用完成结果；手动刷新页面后仍可重新验证。
+let passwordlessAttempt: { token: string; promise: ReturnType<typeof loginWithToken> } | undefined;
+
 const CallbackPage = () => {
   const location = useLocation();
   const { i18n } = useDocusaurusContext();
@@ -68,30 +72,34 @@ const CallbackPage = () => {
       console.error("An error occurred while handling the OAuth callback:", error);
       setPhase("failed");
     }
-  }, [location]);
+  }, [location.search, location.hash]);
 
   const loginUserWithToken = async (token: string) => {
     try {
-      await loginWithToken(token);
+      if (passwordlessAttempt?.token !== token) {
+        passwordlessAttempt = { token, promise: loginWithToken(token) };
+      }
+      await passwordlessAttempt.promise;
     } catch (error) {
       console.error("Login failed, token is invalid or expired:", error);
-    } finally {
-      // Strapi 后台 Confirmation URL 固定为 /user/auth（默认语言），
-      // 用发起登录时存的 locale 前缀还原用户原始语言首页。
-      // 必须对照 i18n.locales 白名单校验：直接拼接 localStorage 原值时，
-      // 形如 "//evil.com" 的值会让 location.replace 变成协议相对开放重定向。
-      let localePrefix = "";
-      try {
-        // 走 lscache：写入方给了 30 分钟 TTL，过期自动失效，不会像裸 localStorage
-        // 那样把几周前放弃的那次尝试的语言残值留到现在
-        const stored = getCache(PASSWORDLESS_LOCALE_KEY) || "";
-        removeCache(PASSWORDLESS_LOCALE_KEY);
-        if (i18n.locales.some((locale) => locale !== i18n.defaultLocale && stored === `/${locale}`)) {
-          localePrefix = stored;
-        }
-      } catch {}
-      window.location.replace(localePrefix + "/");
+      setPhase("failed");
+      return;
     }
+    // Strapi 后台 Confirmation URL 固定为 /user/auth（默认语言），
+    // 用发起登录时存的 locale 前缀还原用户原始语言首页。
+    // 必须对照 i18n.locales 白名单校验：直接拼接 localStorage 原值时，
+    // 形如 "//evil.com" 的值会让 location.replace 变成协议相对开放重定向。
+    let localePrefix = "";
+    try {
+      // 走 lscache：写入方给了 30 分钟 TTL，过期自动失效，不会像裸 localStorage
+      // 那样把几周前放弃的那次尝试的语言残值留到现在
+      const stored = getCache(PASSWORDLESS_LOCALE_KEY) || "";
+      removeCache(PASSWORDLESS_LOCALE_KEY);
+      if (i18n.locales.some((locale) => locale !== i18n.defaultLocale && stored === `/${locale}`)) {
+        localePrefix = stored;
+      }
+    } catch {}
+    window.location.replace(localePrefix + "/");
   };
 
   // 登录成功会 location.replace 离开本页，这里只覆盖"处理中"和两种走不下去的情况
